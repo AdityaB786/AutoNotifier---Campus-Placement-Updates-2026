@@ -4,6 +4,7 @@ const axios = require("axios");
 const fs = require("fs");
 require("dotenv").config();
 
+// Push data to Google Sheets
 async function pushToGoogleSheets(data) {
   const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID);
   await doc.useServiceAccountAuth({
@@ -15,49 +16,90 @@ async function pushToGoogleSheets(data) {
   await sheet.addRow(data);
 }
 
+// Convert "x hours ago" or "a day ago" to Date object
+function parseRelativeTime(text) {
+  const lower = text.toLowerCase();
+  if (lower.includes("hour")) {
+    const num = parseInt(lower) || 0;
+    return new Date(Date.now() - num * 3600 * 1000);
+  }
+  if (lower.includes("day")) {
+    const num = lower.includes("a day") ? 1 : parseInt(lower) || 0;
+    return new Date(Date.now() - num * 24 * 3600 * 1000);
+  }
+  return new Date(0);
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
   const page = await context.newPage();
 
   try {
-    // 1. Go to login page
+    // Step 1: Login
     await page.goto("https://app.joinsuperset.com/students/login");
-
-    // 2. Login
     await page.getByPlaceholder("Email").fill(process.env.EMAIL);
     await page.getByPlaceholder("Password").fill(process.env.PASSWORD);
     await page.getByRole("button", { name: "Login" }).click();
-
-    // 3. Wait for dashboard
     await page.waitForURL("**/students", { timeout: 60000 });
 
-    // 4. Go to job profiles
+    // Step 2: Go to Job Profiles page
     const jobProfileUrl = `https://app.joinsuperset.com/students/jobprofiles?currentJobId=${process.env.CURRJOB_ID}`;
     await page.goto(jobProfileUrl, { waitUntil: "domcontentloaded" });
 
-    // 5. Click "All Jobs"
+    // Step 3: Click "All Jobs"
     await page.getByRole("tab", { name: "All Jobs" }).click();
-
-    // 6. Click latest job card
     await page.waitForSelector("div.p-4.flex");
     const jobCards = await page.$$("div.p-4.flex");
+
     if (jobCards.length === 0) {
-      console.log("❌ No job cards found");
+      console.log("❌ No job cards found.");
       await browser.close();
       return;
     }
-    await jobCards[0].click();
 
-    // 7. Extract details
+    console.log(`🧩 Found ${jobCards.length} job cards`);
+    let latestJob = null;
+    let latestTime = new Date(0);
+
+    for (const [i, card] of jobCards.entries()) {
+      let text = "";
+      try {
+        // Try inner <p> tag or full card
+        text = await card.innerText();
+      } catch {
+        console.log(`⚠️ Card ${i + 1}: error extracting innerText`);
+        continue;
+      }
+
+      console.log(`🔹 Job Card ${i + 1} Text:\n${text}\n`);
+
+      const match = text.match(/(\d+\s+hours?\s+ago|\d+\s+days?\s+ago|a\s+day\s+ago)/i);
+      if (match) {
+        const postDate = parseRelativeTime(match[1]);
+        console.log(`⏰ Detected post time: ${match[1]} → ${postDate}`);
+        if (postDate > latestTime) {
+          latestTime = postDate;
+          latestJob = card;
+        }
+      } else {
+        console.log(`❌ No time match in card ${i + 1}`);
+      }
+    }
+
+    if (latestJob) {
+      console.log("🕒 Clicking most recent job card...");
+      await latestJob.click();
+    } else {
+      console.log("⚠️ Could not determine latest job. Clicking first.");
+      await jobCards[0].click();
+    }
+
+    // Step 4: Extract job info
     await page.waitForSelector("p.text-sm.text-dark.font-normal");
     const companyName = await page.textContent("p.text-sm.text-dark.font-normal");
-
-    const allParagraphs = await page.$$("p.text-dark.text-sm.font-normal");
-    let jobLocation = "N/A";
-    if (allParagraphs.length >= 2) {
-      jobLocation = await allParagraphs[1].textContent();
-    }
+    const locationElems = await page.$$("p.text-dark.text-sm.font-normal");
+    let jobLocation = locationElems.length >= 2 ? await locationElems[1].textContent() : "N/A";
 
     const pTags = await page.$$("p.text-sm, p.text-base");
     let category = "N/A", jobFunction = "N/A", ctc = "N/A";
@@ -70,50 +112,59 @@ async function pushToGoogleSheets(data) {
     }
 
     await page.waitForSelector("div.content-css");
-    const jobDesc = await page.$eval("div.content-css", (el) => el.innerText);
+    const jobDesc = await page.$eval("div.content-css", el => el.innerText);
     const eligibilityMatch = jobDesc.match(/Eligibility Criteria[:\s]*([^\n]+)/i);
     let eligibility = eligibilityMatch ? eligibilityMatch[1].trim() : "Not found";
     eligibility = eligibility.replace(/As per placement policy,?\s*/i, "").trim();
 
-    const jobData = {
-      Company: companyName,
-      Location: jobLocation,
-      Category: category,
-      Role: jobFunction,
-      CTC: ctc,
-      Eligibility: eligibility,
-      ApplyLink: "https://app.joinsuperset.com/students",
-      Timestamp: new Date().toLocaleString(),
-    };
-
-    // 8. Avoid duplicates using lastJob.json
-    const lastJobFile = "./lastJob.json";
     const currentJobId = `${companyName}-${jobFunction}-${ctc}`.toLowerCase();
 
+    console.log(`🧩 Company: ${companyName}`);
+    console.log(`🎯 Role: ${jobFunction}`);
+    console.log(`💸 CTC: ${ctc}`);
+    console.log(`🆔 currentJobId: ${currentJobId}`);
+
+    // Step 5: Check last posted job
+    const lastJobFile = "./lastJob.json";
     let lastJobId = "";
     if (fs.existsSync(lastJobFile)) {
       try {
         const saved = JSON.parse(fs.readFileSync(lastJobFile));
         lastJobId = saved.lastJobId || "";
+        console.log(`📁 lastJobId: ${lastJobId}`);
       } catch (e) {
-        console.error("⚠️ Error reading lastJob.json:", e.message);
+        console.error("⚠️ Could not read lastJob.json:", e.message);
       }
     }
 
     if (currentJobId === lastJobId) {
-      console.log("⏸ No new job posted. Skipping...");
+      console.log("⏸ No new job detected.");
       await browser.close();
       return;
     }
 
+    // Step 6: Save new job
     fs.writeFileSync(lastJobFile, JSON.stringify({ lastJobId: currentJobId }));
-    console.log("🆕 New job detected. Posting...");
+    console.log("🆕 New job detected. Proceeding...");
 
-    // 9. Push to Google Sheets
+    const jobData = {
+      Company: companyName.trim(),
+      Location: jobLocation.trim(),
+      Category: category.trim(),
+      Role: jobFunction.trim(),
+      CTC: ctc.trim(),
+      Eligibility: eligibility.trim(),
+      ApplyLink: "https://app.joinsuperset.com/students",
+      Timestamp: new Date().toLocaleString(),
+    };
+
+    console.log("📦 Job Data:", jobData);
+
+    // Step 7: Push to Google Sheets
     await pushToGoogleSheets(jobData);
-    console.log("📄 Added to Google Sheets");
+    console.log("📄 Job added to Google Sheets");
 
-    // 10. Send to n8n webhook
+    // Step 8: Send to webhook
     try {
       await axios.post(process.env.N8N_WEBHOOK_URL, jobData);
       console.log("🚀 Sent to n8n webhook");
@@ -123,7 +174,7 @@ async function pushToGoogleSheets(data) {
 
     console.log("✅ Done");
   } catch (err) {
-    console.error("❌ Error in script:", err.message);
+    console.error("❌ Script error:", err.message);
   } finally {
     await browser.close();
   }
