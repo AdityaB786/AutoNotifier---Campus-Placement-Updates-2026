@@ -1,5 +1,3 @@
----
-
 # 📢 JIIT Superset Placement Notifier
 
 An automated bot that scrapes job openings from [Superset](https://joinsuperset.com) using **Playwright**, detects new job postings, and sends real-time updates to a **Telegram channel** via **n8n webhooks**. This smart, low-code AI agent keeps JIIT students instantly informed about placement opportunities.
