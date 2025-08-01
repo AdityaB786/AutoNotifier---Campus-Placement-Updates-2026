@@ -102,14 +102,6 @@ N8N_WEBHOOK_URL=https://your-n8n-domain/webhook/sheet-job-alert
 🔗 Apply here: https://app.joinsuperset.com/students  
 
 Stay sharp and good luck! 🚀  
-— JIIT Placement Bot
 ```
 
 ---
-
-## 👨‍💻 Author
-
-**Aditya Bhatia**
----
-
-Let me know if you'd like a logo or badge section too.
